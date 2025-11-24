@@ -68,7 +68,7 @@ Erro esperado: "HTTP ERROR 502"
 ❌ https://miniature-goggles-x5r675g7q766fvrpq-5672.app.github.dev/
 Erro esperado: "HTTP ERROR 502"
 
-✅ CORRETO: Acesso APENAS via string de conexão interna
+ CORRETO: Acesso APENAS via string de conexão interna
    amqp://guest:guest@rabbitmq:5672/
 ```
 
@@ -80,7 +80,7 @@ Password: guest
 
 ---
 
-### 4️⃣ RabbitMQ Management Console (Porta 15672 - HTTP)
+### 4️ RabbitMQ Management Console (Porta 15672 - HTTP)
 ```
 ❌ https://miniature-goggles-x5r675g7q766fvrpq-15672.app.github.dev/
 Erro esperado: "HTTP ERROR 502 - Connection Refused"
