@@ -1,8 +1,8 @@
-import motor.motor_asyncio as motor_async
+from pymongo import MongoClient
 import os
 
-MONGO_URI = os.getenv("MONGO_URI", "mongodb://mongo:27017")
-MONGO_DB_NAME = os.getenv("MONGO_DB_NAME", "transflow_db")
+MONGO_URL = os.getenv("MONGO_URL", "mongodb://mongo:27017")
+MONGO_DB_NAME = os.getenv("MONGO_DB_NAME", "transflow")
 
-mongo_client = None
-db = None
+mongo_client = MongoClient(MONGO_URL)
+db = mongo_client[MONGO_DB_NAME]

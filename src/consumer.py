@@ -1,31 +1,41 @@
 from faststream import FastStream
 from faststream.rabbit import RabbitBroker
 import os
-from pymongo import MongoClient  # ✅ MUDADO: PyMongo em vez de Motor
+from pymongo import MongoClient
 import redis
 
 # Configurações
 RABBITMQ_URL = os.getenv("RABBITMQ_URL", "amqp://guest:guest@rabbitmq:5672/")
 MONGO_URL = os.getenv("MONGO_URL", "mongodb://mongo:27017")
-REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379")
 
 # Conexões
 broker = RabbitBroker(RABBITMQ_URL)
 app = FastStream(broker)
 
-# ✅ CORRIGIDO: Usando PyMongo síncrono
+# Usando PyMongo síncrono
 mongo_client = MongoClient(MONGO_URL)
 db = mongo_client.transflow
-redis_client = redis.from_url(REDIS_URL, decode_responses=True)
+
+redis_client = redis.Redis(
+    host=os.getenv("REDIS_HOST", "redis"),
+    port=int(os.getenv("REDIS_PORT", "6379")),
+    db=0,
+    decode_responses=True
+)
 
 @broker.subscriber("corridas_finalizadas")
 async def processar_corrida_finalizada(corrida_data: dict):
     """Processa corrida finalizada: atualiza Redis e MongoDB"""
     try:
-        print(f"🔄 Processando corrida: {corrida_data['id_corrida']}")
+        print(f"🔄 Processando corrida: {corrida_data.get('id_corrida', 'unknown')}")
         
-        motorista_nome = corrida_data['motorista']['nome'].lower()
-        valor_corrida = corrida_data['valor_corrida']
+        # Preserve original capitalization as requested
+        motorista_nome = corrida_data.get('motorista', {}).get('nome', '')
+        valor_corrida = corrida_data.get('valor_corrida', 0)
+        
+        if not motorista_nome:
+            print("❌ Erro: Nome do motorista não encontrado")
+            return
         
         # Atualizar saldo do motorista no Redis com atomicidade
         with redis_client.pipeline() as pipe:
@@ -44,16 +54,18 @@ async def processar_corrida_finalizada(corrida_data: dict):
         
         print(f"💰 Saldo atualizado: {motorista_nome} = {novo_saldo}")
         
-        # ✅ CORRIGIDO: MongoDB síncrono (sem await)
+        # MongoDB síncrono
         db.corridas.update_one(
-            {"id_corrida": corrida_data["id_corrida"]},
+            {"id_corrida": corrida_data.get("id_corrida")},
             {"$set": {"processada": True, "saldo_atualizado": True}}
         )
         
-        print(f"✅ Corrida {corrida_data['id_corrida']} processada com sucesso!")
+        print(f"✅ Corrida {corrida_data.get('id_corrida')} processada com sucesso!")
         
     except Exception as e:
         print(f"❌ Erro ao processar corrida: {e}")
+        import traceback
+        traceback.print_exc()
 
 if __name__ == "__main__":
     import asyncio

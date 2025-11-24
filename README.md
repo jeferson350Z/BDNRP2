@@ -1,3 +1,73 @@
+# TransFlow (dev)
+
+DUPLA Jeferson rosa, Alexander guido  
+Este repositório contém uma API FastAPI que simula um fluxo de corridas:
+
+- Persistência: MongoDB
+- Cache/saldo: Redis
+- Mensageria assíncrona: RabbitMQ
+- Consumer: Processa eventos `corridas_finalizadas` e atualiza Redis/MongoDB
+
+Como usar (desenvolvimento)
+
+1. Subir os serviços:
+
+```bash
+docker-compose up -d --build
+```
+
+2. Testar o fluxo manualmente (exemplo):
+
+```bash
+curl -X POST http://localhost:8000/corridas \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "passageiro": {"nome":"Ana","telefone":"5511999999999"},
+    "motorista": {"nome":"Carlos","nota":4.8},
+    "origem":"Rua A, 10",
+    "destino":"Av. B, 200",
+    "valor_corrida":25.5,
+    "forma_pagamento":"cartao"
+  }'
+
+# verificar saldo
+curl http://localhost:8000/saldo/Carlos
+
+# listar corridas
+curl http://localhost:8000/corridas
+```
+
+Testes automatizados
+
+Instale dependências e execute os testes:
+
+```bash
+pip install -r requirements.txt
+pytest -q
+```
+
+Normalização e persistência
+
+- Ao iniciar, a API executa uma rotina que normaliza chaves Redis `saldo:*` para evitar duplicatas (soma valores e mantém uma chave canônica).
+- `docker-compose.yml` foi atualizado para adicionar um volume persistente para o Redis (`redis_data`) e já existe volume para MongoDB (`mongo_data`).
+
+Backups (exemplos)
+
+- MongoDB (dentro do container `mongo`):
+  ```bash
+  # cria um dump da database transflow
+  docker exec bdnrp2-mongo-1 mongodump --db transflow --archive=/tmp/transflow-$(date +%F).gz --gzip
+  docker cp bdnrp2-mongo-1:/tmp/transflow-$(date +%F).gz ./
+  ```
+
+- Redis (RDB snapshot):
+  ```bash
+  # força snapshot no container e copia o dump
+  docker exec bdnrp2-redis-1 redis-cli SAVE
+  docker cp bdnrp2-redis-1:/data/dump.rdb ./dump.rdb
+  ```
+
+Se desejar, posso adicionar hooks/cron para backups automáticos e retenção.
 TransFlow Backend Prototype
 
 Este projeto é um protótipo de backend para gerenciar corridas urbanas, focado em processamento de dados em tempo real e assíncrono. Utiliza FastAPI para a API principal, MongoDB para persistência de dados de corrida, Redis para gerenciamento de saldo de motoristas (atômico) e RabbitMQ com FastStream para mensageria assíncrona.
@@ -112,8 +182,8 @@ Teste de Processamento Assíncrono:
 Verifique o log do contêiner transflow_consumer. Você deverá ver as mensagens de processamento:
 
 docker logs transflow_consumer
-# ... 💰 Saldo de Carla incrementado em 25.50. Novo saldo: 125.50
-# ... ✅ Corrida [ID] atualizada para PROCESSADO no MongoDB.
+# ...  Saldo de Carla incrementado em 25.50. Novo saldo: 125.50
+# ...  Corrida [ID] atualizada para PROCESSADO no MongoDB.
 
 
 Consulte o novo saldo:
@@ -130,8 +200,10 @@ Filtrar por Pagamento: GET /corridas/Cartao
 
 Captura de Tela do Sistema em Execução
 
-(Neste ponto, você deve adicionar uma imagem real do seu terminal com o docker-compose ps e, idealmente, uma tela do Swagger UI ou dos logs mostrando o processamento assíncrono.)
 
-Link do Repositório GitHub
 
-[Insira o link do seu repositório GitHub público aqui]
+
+
+##**4.Captura de Tela do Sistema em Execução**
+![Projeto rodando ](img/Captura%20de%20tela%202025-11-24%20170451.png)
+

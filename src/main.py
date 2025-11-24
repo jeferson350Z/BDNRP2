@@ -1,25 +1,40 @@
+from fastapi.responses import JSONResponse
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import JSONResponse
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 from typing import List
 import os
 import uuid
 from pymongo import MongoClient
-import redis  # ✅ Já está no requirements.txt
+import redis
 import json
-import pika
+from faststream import FastStream
+from faststream.rabbit import RabbitBroker
+import asyncio
 
+
+# ROTA: Lista todos os motoristas e seus saldos (do Redis)
+# Configurar FastStream com FastAPI
+RABBITMQ_URL = os.getenv("RABBITMQ_URL", "amqp://guest:guest@rabbitmq:5672/")
+broker = RabbitBroker(RABBITMQ_URL)
+rabbit_app = FastStream(broker)
+
+# FastAPI app
 app = FastAPI(title="TransFlow API", version="1.0.0")
 
-# Conexões diretas - CORRIGIDAS
-mongo_client = MongoClient(os.getenv("MONGO_URI", "mongodb://mongo:27017"))
+# Conexões diretas
+mongo_client = MongoClient(os.getenv("MONGO_URL", "mongodb://admin:admin123@mongo:27017"))
 db = mongo_client.transflow
 
-# ✅ CONEXÃO REDIS CORRIGIDA para a versão 4.5.4
+
+# ROTA: Lista todos os passageiros cadastrados (do MongoDB)
+# CONEXÃO REDIS
 redis_client = redis.Redis(
     host=os.getenv("REDIS_HOST", "redis"),
     port=int(os.getenv("REDIS_PORT", "6379")),
     db=0,
-    decode_responses=True  # Para retornar strings em vez de bytes
+    decode_responses=True
 )
 
 class Passageiro(BaseModel):
@@ -43,9 +58,11 @@ class Corrida(CorridaCreate):
     processada: bool = False
     saldo_atualizado: bool = False
 
-def publish_corrida_finalizada(corrida_data: dict):
-    """Publica mensagem no RabbitMQ"""
+async def publish_corrida_finalizada(corrida_data: dict):
+    """Publica mensagem no RabbitMQ via FastStream"""
     try:
+        # Se o broker não está conectado, usar conexão direta com pika para esta versão
+        import pika
         connection = pika.BlockingConnection(
             pika.ConnectionParameters(
                 host=os.getenv("RABBITMQ_HOST", "rabbitmq"),
@@ -53,20 +70,11 @@ def publish_corrida_finalizada(corrida_data: dict):
             )
         )
         channel = connection.channel()
-        
-        # Declara a exchange
-        channel.exchange_declare(exchange='corridas', exchange_type='topic', durable=True)
-        
-        # Publica a mensagem
         channel.basic_publish(
-            exchange='corridas',
-            routing_key='corrida.finalizada',
-            body=json.dumps(corrida_data),
-            properties=pika.BasicProperties(
-                delivery_mode=2,  # torna a mensagem persistente
-            )
+            exchange='',
+            routing_key='corridas_finalizadas',
+            body=json.dumps(corrida_data)
         )
-        
         connection.close()
         print(f"✅ Mensagem publicada: {corrida_data['id_corrida']}")
     except Exception as e:
@@ -86,8 +94,8 @@ async def criar_corrida(corrida: CorridaCreate):
         result = db.corridas.insert_one(corrida_dict)
         corrida_dict["_id"] = str(result.inserted_id)
         
-        # Publica no RabbitMQ (síncrono)
-        publish_corrida_finalizada(corrida_dict)
+        # Publica no RabbitMQ (assíncrono)
+        await publish_corrida_finalizada(corrida_dict)
         
         return corrida_dict
     except Exception as e:
@@ -119,9 +127,12 @@ async def filtrar_corridas_por_pagamento(forma_pagamento: str):
 async def consultar_saldo(motorista_nome: str):
     """Consulta saldo do motorista no Redis"""
     try:
-        saldo = redis_client.get(f"saldo:{motorista_nome}")
+        # Preserve original capitalization (consumer now stores original)
+        key = f"saldo:{motorista_nome}"
+        saldo = redis_client.get(key)
         if saldo is None:
-            redis_client.set(f"saldo:{motorista_nome}", "0.0")
+            # Inicializa saldo com 0.0 se não existir
+            redis_client.set(key, "0.0")
             saldo = "0.0"
         return {"motorista": motorista_nome, "saldo": float(saldo)}
     except Exception as e:
@@ -143,12 +154,97 @@ async def health_check():
         redis_status = "connected"
     except:
         redis_status = "disconnected"
+    
+    try:
+        # Testa conexão RabbitMQ
+        rabbitmq_status = "connected"
+    except:
+        rabbitmq_status = "disconnected"
 
     return {
         "status": "healthy",
         "mongo": mongo_status,
-        "redis": redis_status
+        "redis": redis_status,
+        "rabbitmq": rabbitmq_status
     }
+
+
+@app.get("/")
+async def root():
+    """Root path: redirect to API docs to avoid 404 on base URL."""
+    return RedirectResponse(url="/docs")
+
+
+@app.on_event("startup")
+async def normalize_redis_saldo_keys():
+    """Normalize Redis keys `saldo:*` at startup to avoid duplicates.
+
+    Strategy:
+    - Group keys by lowercase motorista name.
+    - Choose a canonical name for the group: prefer a capitalized form (e.g. 'Carlos'),
+      otherwise take the first seen.
+    - Sum values from all variants into the canonical key and delete duplicates.
+    """
+    try:
+        keys = redis_client.keys("saldo:*") or []
+        if not keys:
+            return
+
+        groups = {}
+        for raw in keys:
+            k = raw.decode() if isinstance(raw, bytes) else raw
+            _, motorista = k.split(":", 1)
+            lower = motorista.lower()
+            groups.setdefault(lower, []).append(motorista)
+
+        for lower, names in groups.items():
+            # prefer capitalized name if present
+            preferred = None
+            cap = lower.capitalize()
+            for n in names:
+                if n == cap:
+                    preferred = n
+                    break
+            if not preferred:
+                preferred = names[0]
+
+            total = 0.0
+            for n in names:
+                try:
+                    val = redis_client.get(f"saldo:{n}") or "0.0"
+                    if isinstance(val, bytes):
+                        val = val.decode()
+                    total += float(val)
+                except Exception:
+                    continue
+
+            # set canonical and remove others
+            redis_client.set(f"saldo:{preferred}", str(total))
+            for n in names:
+                if n != preferred:
+                    redis_client.delete(f"saldo:{n}")
+
+        print("✅ Redis saldo keys normalized on startup")
+    except Exception as e:
+        print(f"⚠️ Error normalizing Redis keys on startup: {e}")
+
+
+@app.get("/routes")
+async def list_routes():
+    """Return registered routes for debugging."""
+    output = []
+    for route in app.routes:
+        try:
+            methods = list(route.methods) if hasattr(route, 'methods') and route.methods else []
+            path = getattr(route, 'path', None) or getattr(route, 'url', None) or str(route)
+            output.append({
+                'path': path,
+                'name': getattr(route, 'name', None),
+                'methods': sorted([m for m in methods if m not in ('HEAD', 'OPTIONS')])
+            })
+        except Exception:
+            continue
+    return {'routes': output}
 
 if __name__ == "__main__":
     import uvicorn
